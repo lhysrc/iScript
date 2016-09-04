@@ -3,6 +3,7 @@
 
 import os
 import sys
+import functools
 import requests
 requests.packages.urllib3.disable_warnings() # disable urllib3's warnings https://urllib3.readthedocs.org/en/latest/security.html#insecurerequestwarning
 from requests_toolbelt import MultipartEncoder
@@ -108,14 +109,13 @@ upload_datas_path = os.path.join(os.path.expanduser('~'), '.bp.pickle')
 save_share_path = os.path.join(os.path.expanduser('~'), '.bp.ss.pickle')
 
 headers = {
-    "Accept":"text/html,application/xhtml+xml,application/xml; " \
-        "q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Encoding":"text/html",
+    "Accept": "application/json, text/javascript, text/html, */*; q=0.01",
+    "Accept-Encoding":"gzip, deflate, sdch",
     "Accept-Language":"en-US,en;q=0.8,zh-CN;q=0.6,zh;q=0.4,zh-TW;q=0.2",
-    "Content-Type":"application/x-www-form-urlencoded",
-    "Referer":"http://www.baidu.com/",
-    "User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " \
-        "(KHTML, like Gecko) Chrome/44.0.2403.89 Safari/537.36"
+    "Referer":"http://pan.baidu.com/disk/home",
+    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36",
+    "Connection": "keep-alive",
 }
 
 ss = requests.session()
@@ -217,11 +217,14 @@ def print_process_bar(point, total, slice_size,
     sys.stdout.flush()
     return now
 
+
 class panbaiducom_HOME(object):
     def __init__(self):
         self._download_do = self._play_do if args.play else self._download_do
         self.ondup = 'overwrite'
         self.accounts = self._check_cookie_file()
+        self.dsign = None
+        self.timestamp = None
 
         self.highlights = []
         if any([args.tails, args.heads, args.includes]):
@@ -237,6 +240,21 @@ class panbaiducom_HOME(object):
 
         if 'ec' in args.type_ or 'dc' in args.type_ or args.comd == 'dc':
             import_shadowsocks()
+
+    def _request(self, method, url, action, **kwargs):
+        i = 0
+        while i < 3:
+            i += 1
+            response = ss.request(method, url, **kwargs)
+            if not (response.ok is True and response.status_code == 200):
+                continue
+            else:
+                return response
+
+        self.save_cookies()
+
+        print s % (1, 91, ' ! [{}] Server error'.format(action))
+        sys.exit()
 
     @staticmethod
     def _check_cookie_file():
@@ -304,10 +322,9 @@ class panbaiducom_HOME(object):
         return input_code
 
     def check_login(self):
-        #print s % (1, 97, '\n  -- check_login')
-        url = 'http://pan.baidu.com/api/quota'
-        j = ss.get(url).json()
-        if j['errno'] != 0:
+        html_string = self._request('GET', 'http://pan.baidu.com/disk/home', 'check_login').content
+
+        if '"loginstate":1' not in html_string:
             print s % (1, 91, '  -- check_login fail\n')
             return False
         else:
@@ -339,66 +356,81 @@ class panbaiducom_HOME(object):
             '401007': '手机号关联了其他帐号，请选择登录'
         }
 
+        self._request('GET', 'http://www.baidu.com', 'login')
+
         # Get token
-        token = self._get_bdstoken()
+        # token = self._get_bdstoken()
+        resp = self._request('GET', 'https://passport.baidu.com/v2/api/?getapi&tpl=netdisk'
+                      '&apiver=v3&tt={}&class=login&logintype=basicLogin'.format(int(time.time())),
+                             'login')
+
+        _json = json.loads(resp.content.replace('\'', '"'))
+        if _json['errInfo']['no'] != "0":
+            print s % (1, 91, ' ! Can\'t get token')
+            sys.exit(1)
+
+        token = _json['data']['token']
+        code_string = _json['data']['codeString']
 
         # get publickey
-        url = 'https://passport.baidu.com/v2/getpublickey?token=%s' % token
-        r = ss.get(url)
-        j = json.loads(r.content.replace('\'', '"'))
-        pubkey = j['pubkey']
-        key = rsa.PublicKey.load_pkcs1_openssl_pem(pubkey)
-        password_encoded = base64.b64encode(rsa.encrypt(password, key))
-        rsakey = j['key']
+        # url = ('https://passport.baidu.com/v2/getpublickey?&token={}'
+               # '&tpl=netdisk&apiver=v3&tt={}').format(token, int(time.time()))
+        # r = ss.get(url)
+        # j = json.loads(r.content.replace('\'', '"'))
+        # pubkey = j['pubkey']
+        # key = rsa.PublicKey.load_pkcs1_openssl_pem(pubkey)
+        # password_encoded = base64.b64encode(rsa.encrypt(password, key))
+        # rsakey = j['key']
 
         # Construct post body
-        data = {
-            "staticpage": "https://www.baidu.com/cache/user/html/v3Jump.html",
-            "charset": "UTF-8",
-            "token": token,
-            "tpl": "mn",
-            "subpro": "",
-            "apiver": "v3",
-            "tt": int(time.time()),
-            "codestring": "",
-            "safeflg": "0",
-            "u": "https://www.baidu.com/",
-            "isPhone": "",
-            "detect": "1",
-            "quick_user": "0",
-            "logintype": "dialogLogin",
-            "logLoginType": "pc_loginDialog",
-            "idc": "",
-            "loginmerge": "true",
-            "splogin": "rate",
-            "username": username,
-            "password": password_encoded,
-            "verifycode": "",
-            "rsakey": str(rsakey),
-            "crypttype": "12",
-            "ppui_logintime": "155983",
-            "callback": "parent.bd__pcbs__pld7nd",
-        }
-
+        verifycode = ''
         while True:
+            data = {
+                "staticpage": "http://pan.baidu.com/res/static/thirdparty/pass_v3_jump.html",
+                "charset": "utf-8",
+                "token": token,
+                "tpl": "netdisk",
+                "subpro": "",
+                "apiver": "v3",
+                "tt": int(time.time()),
+                "codestring": code_string,
+                "safeflg": "0",
+                "u": "http://pan.baidu.com/",
+                "isPhone": "",
+                "quick_user": "0",
+                "logintype": "basicLogin",
+                "logLoginType": "pc_loginBasic",
+                "idc": "",
+                "loginmerge": "true",
+                "username": username,
+                "password": password,
+                "verifycode": verifycode,
+                "mem_pass": "on",
+                "rsakey": "",
+                "crypttype": "",
+                "ppui_logintime": "2602",
+                "callback": "parent.bd__pcbs__ahhlgk",
+            }
+
             # Post!
             # XXX : do not handle errors
             url = 'https://passport.baidu.com/v2/api/?login'
             r = ss.post(url, data=data)
 
             # Callback for verify code if we need
-            #codestring = r.content[r.content.index('(')+1:r.content.index(')')]
+            #code_string = r.content[r.content.index('(')+1:r.content.index(')')]
             errno = re.search(r'err_no=(\d+)', r.content).group(1)
-            if errno == '0' or ss.cookies.get('BDUSS'):
+            if ss.cookies.get('BDUSS'):
+                # ss.get("http://pan.baidu.com/disk/home")
                 break
             elif errno in ('257', '3', '6'):
                 print s % (1, 91, ' ! Error %s:' % errno), \
                     login_error_msg[errno]
                 t = re.search('codeString=(.+?)&', r.content)
-                codestring = t.group(1) if t else ""
-                vcurl = 'https://passport.baidu.com/cgi-bin/genimage?'+codestring
-                verifycode = self.save_img(vcurl, 'jpg') if codestring != "" else ""
-                data['codestring'] = codestring
+                code_string = t.group(1) if t else ""
+                vcurl = 'https://passport.baidu.com/cgi-bin/genimage?' + code_string
+                verifycode = self.save_img(vcurl, 'jpg') if code_string != "" else ""
+                data['codestring'] = code_string
                 data['verifycode'] = verifycode
                 #self.save_cookies()
             else:
@@ -432,8 +464,20 @@ class panbaiducom_HOME(object):
         if hasattr(self, 'bdstoken'):
             return self.bdstoken
 
-        self.bdstoken = md5.new(str(time.time())).hexdigest()
-        return self.bdstoken
+        resp = self._request('GET', 'http://pan.baidu.com/disk/home',
+                             '_get_bdstoken')
+
+        html_string = resp.content
+
+        mod = re.search(r'"bdstoken":"(.+?)"', html_string)
+        if mod:
+            self.bdstoken = mod.group(1)
+            return self.bdstoken
+        else:
+            print s % (1, 91, ' ! Can\'t get bdstoken')
+            sys.exit(1)
+
+        # self.bdstoken = md5.new(str(time.time())).hexdigest()
 
     #def _sift(self, fileslist, name=None, size=None, time=None, head=None, tail=None, include=None, exclude=None):
     def _sift(self, fileslist, **arguments):
@@ -571,8 +615,10 @@ class panbaiducom_HOME(object):
 
     def _get_quota(self):
         url = 'http://pan.baidu.com/api/quota'
-        r = ss.get(url)
-        j = r.json()
+
+        resp = self._request('GET', url, '_get_quota')
+
+        j = resp.json()
         if j['errno'] != 0:
             print s % (1, 92, '  !! Error at _get_quota')
             sys.exit(1)
@@ -596,14 +642,15 @@ class panbaiducom_HOME(object):
             "desc": 1,   ## reversely
             "order": order, ## sort by name, or size, time
             "_": int(time.time()*1000),
-            #"bdstoken": self._get_bdstoken(),
+            # "bdstoken": self._get_bdstoken(),
         }
         if not desc: del p['desc']
         url = 'http://pan.baidu.com/api/list'
 
         infos = []
         while True:
-            r = ss.get(url, params=p, headers=theaders)
+            # r = ss.get(url, params=p, headers=theaders)
+            r = ss.get(url, params=p)
             j = r.json()
             if j['errno'] != 0:
                 print s % (1, 91, '  error: _get_file_list'), '--', j
@@ -620,12 +667,16 @@ class panbaiducom_HOME(object):
                 return j
 
     def _get_dsign(self):
+        # if self.dsign is not None:
+            # return None
+
         url = 'http://pan.baidu.com/disk/home'
-        r = ss.get(url)
+        r = self._request('GET', url, '_get_dsign')
         html = r.content
-        sign1 = re.search(r'sign1 = \'(.+?)\';', html).group(1)
-        sign3 = re.search(r'sign3 = \'(.+?)\';', html).group(1)
-        timestamp = re.search(r'timestamp = \'(.+?)\';', html).group(1)
+
+        sign1 = re.search(r'"sign1":"(.+?)"', html).group(1)
+        sign3 = re.search(r'"sign3":"(.+?)"', html).group(1)
+        timestamp = re.search(r'"timestamp":(\d+)', html).group(1)
 
         # following javascript code from http://pan.baidu.com/disk/home
         #yunData.sign2 = function s(j, r) {
@@ -688,36 +739,42 @@ class panbaiducom_HOME(object):
         self.dsign = sign2(sign3, sign1)
         self.timestamp = timestamp
 
-    def _get_dlink(self, i):
-        if not hasattr(self, 'dsign'):
-            self._get_dsign()
+    def _get_dlink(self, path):
+        dlink = ('http://c.pcs.baidu.com/rest/2.0/pcs/file?method=download'
+               '&app_id=250528&path={}').format(urllib.quote(path))
+        dlink = fast_pcs_server(dlink)
+        return dlink
 
+    def _get_dlink3(self, fs_id):
         while True:
+            dsign, timestamp = self._get_dsign()
+
             params = {
                 "channel": "chunlei",
                 "clienttype": 0,
+                "app_id": "250528",
                 "web": 1,
-                #"bdstoken": self._get_bdstoken()
-            }
-
-            data = {
+                # "bdstoken": self._get_bdstoken(),
                 "sign": self.dsign,
                 "timestamp": self.timestamp,
-                "fidlist": "[%s]" % i['fs_id'],
-                "type": "dlink"
+                "fidlist": '[{}]'.format(fs_id),
+                "type": "dlink",
             }
 
             url = 'http://pan.baidu.com/api/download'
-            r = ss.post(url, params=params, data=data)
+            r = ss.get(url, params=params)
             j = r.json()
+            print(j)
             if j['errno'] == 0:
                 dlink = j['dlink'][0]['dlink'].encode('utf8')
-                dlink = re.sub(r'prisign=.+?(&|$)', r'prisign=unknow\1', dlink)
-                dlink = dlink.replace('chkbd=0', 'chkbd=1')
-                dlink = dlink.replace('chkv=0', 'chkv=1')
+                # dlink = re.sub(r'prisign=.+?(&|$)', r'prisign=unknow\1', dlink)
+                # dlink = dlink.replace('chkbd=0', 'chkbd=1')
+                # dlink = dlink.replace('chkv=0', 'chkv=1')
+                dlink = fast_pcs_server(dlink)
                 return dlink
             else:
-                self._get_dsign()
+                print s % (1, 91, '  !! Error at _get_dlink, can\'t get dlink')
+                continue
 
     def _get_dlink2(self, i):
         j = self._meta([i['path'].encode('utf8')], dlink=1)
@@ -752,7 +809,7 @@ class panbaiducom_HOME(object):
             base_dir = '' if os.path.split(path)[0] == '/' \
                 else os.path.split(path)[0]
 
-            meta = self._meta([path], dlink=1)
+            meta = self._meta([path], dlink=0)
             if meta:
                 if meta['info'][0]['isdir']:
                     dir_loop = [path]
@@ -794,8 +851,7 @@ class panbaiducom_HOME(object):
                                 t = t[1:] if t[0] == '/' else t
                                 t =  os.path.join(os.getcwd(), t)
 
-                                if not i.has_key('dlink'):
-                                    i['dlink'] = self._get_dlink2(i)
+                                i['dlink'] = self._get_dlink(i['path'].encode('utf8'))
 
                                 infos = {
                                     'file': t,
@@ -822,10 +878,10 @@ class panbaiducom_HOME(object):
                         'file': t,
                         'path': meta['info'][0]['path'].encode('utf8'),
                         'dir_': os.path.split(t)[0],
-                        #'dlink': self._get_dlink(meta['info'][0]),
+                        'dlink': self._get_dlink(meta['info'][0]['path'].encode('utf8')),
                         'm3u8': self._get_m3u8(meta['info'][0]) \
                             if 'm3' in args.type_ else None,
-                        'dlink': meta['info'][0]['dlink'].encode('utf8'),
+                        # 'dlink': meta['info'][0]['dlink'].encode('utf8'),
                         'name': meta['info'][0]['server_filename'].encode('utf8'),
                         'size': meta['info'][0]['size'],
                     }
@@ -861,6 +917,8 @@ class panbaiducom_HOME(object):
             print s % (1, 93, '  !! 百度8秒 !!')
             return
 
+        cookie = 'Cookie: ' + '; '.join([
+            k + '=' + v for k, v in ss.cookies.get_dict().items()])
         if args.aria2c:
             quiet = ' --quiet=true' if args.quiet else ''
             taria2c = ' -x %s -s %s' % (args.aria2c, args.aria2c)
@@ -870,13 +928,12 @@ class panbaiducom_HOME(object):
                 #'--header "Referer:http://pan.baidu.com/disk/home " ' \
             cmd = 'aria2c -c -k 1M%s%s%s ' \
                 '-o "%s.tmp" -d "%s" ' \
-                '--user-agent "netdisk;5.3.1.3;PC;PC-Windows;5.1.2600;WindowsBaiduYunGuanJia" ' \
+                '--user-agent "%s" ' \
+                '--header "%s" ' \
                 '"%s"' \
                 % (quiet, taria2c, tlimit, infos['name'],
-                    infos['dir_'], infos['dlink'])
+                    infos['dir_'], headers['User-Agent'], cookie, infos['dlink'])
         else:
-            cookie = 'Cookie: ' + '; '.join([
-                k + '=' + v for k, v in ss.cookies.get_dict().items()])
             quiet = ' -q' if args.quiet else ''
             tlimit = ' --limit-rate %s' % args.limit if args.limit else ''
             cmd = 'wget -c%s%s ' \
@@ -933,9 +990,9 @@ class panbaiducom_HOME(object):
             k + '=' + v for k, v in ss.cookies.get_dict().items()])
         quiet = ' --really-quiet' if args.quiet else ''
         cmd = 'mpv%s --no-ytdl --cache-default 20480 --cache-secs 120 ' \
-            '--http-header-fields "User-Agent:%s" ' \
             '--http-header-fields "%s" ' \
-            '--http-header-fields "Referer:http://pan.baidu.com/disk/home" "%s"' \
+            '--http-header-fields "%s" ' \
+            '"%s"' \
             % (quiet, headers['User-Agent'], cookie, infos['dlink'])
 
         os.system(cmd)
@@ -971,14 +1028,17 @@ class panbaiducom_HOME(object):
             return ENoError
 
     def _meta(self, file_list, dlink=0):
+
         p = {
-            "channel": "chunlei",
-            "app_id": "250528",
+            # "channel": "chunlei",
+            # "app_id": "250528",
             "method": "filemetas",
             "dlink": dlink,
             "blocks": 0,  # 0 or 1
-            #"bdstoken": self._get_bdstoken()
+            # "bdstoken": self._get_bdstoken()
         }
+
+        # ss.get('http://pan.baidu.com/disk/home')
         url = 'http://pan.baidu.com/api/filemetas'
         i = 0
         j = {}
@@ -987,7 +1047,8 @@ class panbaiducom_HOME(object):
             if fl:
                 data = {'target': json.dumps(fl)}
                 try:
-                    r = ss.post(url, params=p, data=data)
+                    r = self._request('POST', url, '_meta', params=p, data=data)
+                    # r = ss.post(url, params=p, data=data)
                     js = r.json()
                     if js['errno'] == 0 and i == 0:
                         if dlink:
@@ -1685,20 +1746,17 @@ class panbaiducom_HOME(object):
     #######################################################################
     # for finding files
 
-    def _search(self, keyword, directory):
+    def _search(self, keyword, directory, page=1, num=1000):
+
         p = {
-            "channel": "chunlei",
-            "clienttype": 0,
-            "web": 1,
-            "key": keyword,
-            "dir": directory if directory else "",
-            #"timeStamp": "0.15937364846467972",
-            #"bdstoken": self._get_bdstoken(),
+            'recursion': '',
+            'key': keyword,
+            'dir': directory,
         }
 
         if args.recursive: p['recursion'] = 1
         url = 'http://pan.baidu.com/api/search'
-        r = ss.get(url, params=p)
+        r = self._request('GET', url, '_search', params=p)
         j = r.json()
         if j['errno'] == 0:
             return j['list']
@@ -3462,10 +3520,12 @@ def handle_command(comd, xxx):
     else:
         print s % (2, 91, '  !! 命令错误\n')
 
-    if 'x' in locals():
-        x.save_cookies(on=1, tocwd=True)
-    elif 'px' in locals():
-        px.save_cookies(on=1, tocwd=True)
+    # if 'x' in locals():
+        # x.save_cookies(on=1, tocwd=True)
+    # elif 'px' in locals():
+        # px.save_cookies(on=1, tocwd=True)
+
+
 
 def main(argv):
     handle_signal()
